@@ -67,7 +67,7 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1):
 
 # Set API keys
 os.environ["TOGETHER_API_KEY"] = "1dd1a7e6cbd43070e903346ae2638952d71e074221fed5deabb4869232499fbd"
-HF_TOKEN = "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"
+HF_TOKEN = "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"
 os.environ["HUGGINGFACE_TOKEN"] = HF_TOKEN
 
 # Login to Hugging Face
