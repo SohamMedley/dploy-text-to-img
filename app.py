@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify
 from together import Together
 from huggingface_hub import login, InferenceClient
 import logging
@@ -11,13 +11,6 @@ from functools import wraps
 import requests
 from datetime import datetime
 import re
-import cv2
-import numpy as np
-from PIL import Image
-import torch
-from basicsr.archs.rrdbnet_arch import RRDBNet
-from realesrgan import RealESRGANer
-
 
 # Set up logging
 logging.basicConfig(
@@ -32,24 +25,18 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def sanitize_filename(prompt):
     """Convert prompt to a valid filename by removing special characters and limiting length"""
-    # Remove special characters and replace spaces with underscores
     filename = re.sub(r'[^\w\s-]', '', prompt)
     filename = re.sub(r'[-\s]+', '_', filename).strip('-_')
-    # Limit length to 50 characters
     return filename[:50]
 
 def save_image_locally(image_bytes, prompt, model_name):
     """Save the generated image to the output directory"""
     try:
-        # Create a timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        # Sanitize the prompt for use in filename
         safe_prompt = sanitize_filename(prompt)
-        # Create filename with timestamp and prompt
         filename = f"{timestamp}_{safe_prompt}.png"
         filepath = os.path.join(OUTPUT_DIR, filename)
         
-        # Save the image
         with open(filepath, 'wb') as f:
             f.write(image_bytes)
         
@@ -71,8 +58,7 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1):
                     if x == retries:
                         logger.error(f"All {retries} retry attempts failed")
                         raise
-                    wait_time = (backoff_in_seconds * 2 ** x + 
-                               random.uniform(0, 1))
+                    wait_time = (backoff_in_seconds * 2 ** x + random.uniform(0, 1))
                     logger.warning(f"Attempt {x + 1} failed: {str(e)}. Retrying in {wait_time:.2f} seconds...")
                     time.sleep(wait_time)
                     x += 1
@@ -105,48 +91,36 @@ headers = {"Authorization": f"Bearer {os.environ['HUGGINGFACE_TOKEN']}"}
 def generate_with_huggingface(prompt):
     logger.info("Generating image with Hugging Face API")
     try:
-        logger.debug(f"Sending request to Hugging Face API with prompt: {prompt}")
         response = requests.post(API_URL, headers=headers, json={"inputs": prompt})
         response.raise_for_status()
-        logger.debug(f"Response status code: {response.status_code}")
-        logger.debug(f"Response headers: {response.headers}")
         
         image_bytes = response.content
-        logger.debug(f"Received image data of size: {len(image_bytes)} bytes")
-        
-        # Save image locally
         save_image_locally(image_bytes, prompt, "huggingface")
-        
-        # Convert bytes to base64
         image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-        logger.debug(f"Converted to base64 string of length: {len(image_base64)}")
-        
         logger.info("Successfully generated image with Hugging Face API")
         return image_base64
     except requests.exceptions.RequestException as e:
         logger.error(f"Error calling Hugging Face API: {str(e)}", exc_info=True)
         raise Exception("Failed to generate image using Hugging Face API") from e
 
-@retry_with_backoff(retries=2)  # Reduced retries for faster feedback
+@retry_with_backoff(retries=2)
 def generate_with_together(prompt, model):
     logger.info(f"Generating image with Together AI using model: {model}")
     try:
         response = client.images.generate(
             prompt=prompt,
             model=model,
-            width=768,  # Reduced for faster generation
+            width=768,
             height=768,
-            steps=2,    # Reduced steps for faster generation
+            steps=2,
             n=1,
             response_format="b64_json"
         )
         if not response or not response.data:
             raise Exception("No image data in response")
             
-        # Convert base64 to bytes and save locally
         image_bytes = base64.b64decode(response.data[0].b64_json)
         save_image_locally(image_bytes, prompt, "together")
-        
         logger.info("Successfully generated image with Together AI")
         return response.data[0].b64_json
     except Exception as e:
@@ -181,37 +155,6 @@ def generate_with_sd(prompt):
         logger.error(f"Stable Diffusion generation error: {str(e)}")
         raise
 
-def init_realesrgan():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-    
-    # Create weights directory if it doesn't exist
-    model_path = os.path.join(os.path.dirname(__file__), 'weights')
-    os.makedirs(model_path, exist_ok=True)
-    
-    # Model path
-    model_file = os.path.join(model_path, 'RealESRGAN_x4plus.pth')
-    
-    # Download model if not exists
-    if not os.path.exists(model_file):
-        url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
-        response = requests.get(url)
-        with open(model_file, 'wb') as f:
-            f.write(response.content)
-    
-    # Initialize upsampler
-    upsampler = RealESRGANer(
-        scale=4,
-        model_path=model_file,
-        model=model,
-        tile=512,  # Increased tile size for better quality
-        tile_pad=32,  # Increased padding to reduce artifacts
-        pre_pad=0,
-        half=device == 'cuda'  # Use half precision on CUDA
-    )
-    
-    return upsampler
-
 @app.route('/')
 def home():
     return render_template('index.html')
@@ -228,60 +171,6 @@ def contact_us():
 def explore_tools():
     return render_template('explore_tools.html')
 
-
-@app.route('/upscale', methods=['GET', 'POST'])
-def upscale():
-    try:
-        if request.method == 'POST':
-            if 'image' not in request.files:
-                return 'No image uploaded', 400
-            
-            file = request.files['image']
-            if file.filename == '':
-                return 'No image selected', 400
-
-            # Read the image
-            img_stream = BytesIO(file.read())
-            original_image = Image.open(img_stream).convert('RGB')
-            
-            # Convert PIL Image to numpy array
-            input_img = np.array(original_image)
-            
-            try:
-                # Initialize Real-ESRGAN
-                upsampler = init_realesrgan()
-                
-                # Process the image with tiling
-                output, _ = upsampler.enhance(input_img, outscale=4)
-                
-                # Convert output to PIL Image
-                upscaled_pil = Image.fromarray(output)
-                
-            except Exception as e:
-                logging.error(f"Real-ESRGAN failed, falling back to OpenCV: {str(e)}")
-                # Fallback to OpenCV if Real-ESRGAN fails
-                # Use LANCZOS4 for high-quality upscaling
-                upscaled = cv2.resize(input_img, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
-                upscaled_pil = Image.fromarray(upscaled)
-            
-            # Convert images to base64 for display
-            buffered = BytesIO()
-            original_image.save(buffered, format="PNG", optimize=True)
-            original_base64 = base64.b64encode(buffered.getvalue()).decode()
-            
-            buffered = BytesIO()
-            upscaled_pil.save(buffered, format="PNG", optimize=True)
-            upscaled_base64 = base64.b64encode(buffered.getvalue()).decode()
-            
-            return render_template('upscale.html', 
-                                original_image=original_base64,
-                                upscaled_image=upscaled_base64)
-        
-        return render_template('upscale.html')
-    except Exception as e:
-        logging.error(f"Error in upscale route: {str(e)}")
-        return "An error occurred while processing the image", 500
-
 @app.route('/generate', methods=['POST'])
 def generate_image():
     try:
@@ -296,16 +185,12 @@ def generate_image():
         
         try:
             if model == "black-forest-labs/FLUX.1-dev":
-                # Use Hugging Face API
-                logger.debug("Making API request to Hugging Face")
                 image_data = generate_with_huggingface(prompt)
             elif model == SD_MODEL:
                 # Use Stable Diffusion 3.5
                 logger.debug("Making API request to Stable Diffusion")
                 image_data = generate_with_sd(prompt)
             else:
-                # Use Together AI
-                logger.debug("Making API request to Together AI")
                 image_data = generate_with_together(prompt, model)
                 
             return jsonify({'success': True, 'image': image_data})
